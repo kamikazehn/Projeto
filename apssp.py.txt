@@ -1,0 +1,135 @@
+# Sistema de Trading Automatizado com API da Bybit (Spot Market)
+# Suporte a múltiplos pares e painel web Flask com dashboard de estatísticas
+
+import time
+import hmac
+import hashlib
+import requests
+import json
+from flask import Flask, request, render_template_string, redirect, url_for
+
+app = Flask(__name__)
+
+# HTML para conectar API e visualizar dashboard
+HTML_FORM = """
+<!DOCTYPE html>
+<html lang='pt-br'>
+<head><title>Conectar API - Bot de Trade</title></head>
+<body>
+    <h2>Conecte sua API da Bybit</h2>
+    <form method="POST">
+        API Key: <input type="text" name="api_key"><br>
+        API Secret: <input type="text" name="api_secret"><br>
+        Pares (separados por vírgula): <input type="text" name="symbols" placeholder="BTCUSDT,ETHUSDT"><br>
+        Capital por par (USDT): <input type="number" name="capital" value="50"><br>
+        <input type="submit" value="Iniciar Estratégia">
+    </form>
+    <br>
+    <a href='/dashboard'>Ir para o Dashboard</a>
+</body>
+</html>
+"""
+
+HTML_DASHBOARD = """
+<!DOCTYPE html>
+<html lang='pt-br'>
+<head><title>Dashboard de Trades</title></head>
+<body>
+    <h2>Dashboard de Execuções</h2>
+    {% if historico %}
+        <table border="1">
+            <tr><th>Usuário</th><th>Par</th><th>Tipo</th><th>Resultado</th></tr>
+            {% for entrada in historico %}
+            <tr>
+                <td>{{ entrada['user'] }}</td>
+                <td>{{ entrada['symbol'] }}</td>
+                <td>{{ entrada['tipo'] }}</td>
+                <td>{{ entrada['resultado'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>Nenhum trade executado ainda.</p>
+    {% endif %}
+    <br><a href='/'>Voltar</a>
+</body>
+</html>
+"""
+
+BASE_URL = 'https://api.bybit.com'
+
+# Banco de dados (temporário em memória)
+db_usuarios = []
+historico_trades = []
+
+# Função para gerar assinatura dos pedidos
+def gerar_assinatura(api_secret, params):
+    param_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    return hmac.new(bytes(api_secret, "utf-8"), bytes(param_str, "utf-8"), hashlib.sha256).hexdigest()
+
+# Função para enviar ordem (compra ou venda)
+def enviar_ordem(api_key, api_secret, symbol, side, qty, user_id):
+    endpoint = "/spot/v3/order"
+    url = BASE_URL + endpoint
+
+    params = {
+        "apiKey": api_key,
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty,
+        "recvWindow": 5000,
+        "timestamp": int(time.time() * 1000)
+    }
+    params["sign"] = gerar_assinatura(api_secret, params)
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    response = requests.post(url, data=params, headers=headers)
+    res_json = response.json()
+    historico_trades.append({
+        "user": f"User-{user_id}",
+        "symbol": symbol,
+        "tipo": side,
+        "resultado": res_json.get("retMsg", "Desconhecido")
+    })
+    return res_json
+
+# Estratégia simples para múltiplos pares
+def estrategia_multipla(api_key, api_secret, symbols, capital, user_id):
+    for symbol in symbols:
+        print(f"Iniciando trade para {symbol}")
+        print("Comprando...")
+        r1 = enviar_ordem(api_key, api_secret, symbol, "BUY", capital / 30000, user_id)
+        print(r1)
+        time.sleep(10)
+        print("Vendendo...")
+        r2 = enviar_ordem(api_key, api_secret, symbol, "SELL", capital / 30000, user_id)
+        print(r2)
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        api_key = request.form['api_key']
+        api_secret = request.form['api_secret']
+        symbols = request.form['symbols'].replace(" ", "").split(",")
+        capital = float(request.form['capital'])
+
+        user_id = len(db_usuarios) + 1
+        db_usuarios.append({
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "symbols": symbols,
+            "capital": capital
+        })
+
+        estrategia_multipla(api_key, api_secret, symbols, capital, user_id)
+        return redirect(url_for("dashboard"))
+
+    return render_template_string(HTML_FORM)
+
+@app.route("/dashboard")
+def dashboard():
+    return render_template_string(HTML_DASHBOARD, historico=historico_trades)
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
